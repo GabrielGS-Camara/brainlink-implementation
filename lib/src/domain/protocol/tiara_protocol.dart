@@ -48,71 +48,6 @@ int _checksum(List<int> payload) {
   return (~sum) & 0xFF;
 }
 
-List<int> _frame(List<int> payload) {
-  final chk = _checksum(payload);
-  return [0xAA, 0xAA, ...payload, chk, 0x23, 0x23];
-}
-
-/// Monta um pacote sintético de amostra bruta (RAW, código 0x80). [value]
-/// pode ser negativo (a tiara manda amostras com sinal, -32768..32767).
-List<int> buildRawFrame(int value) {
-  final v = value & 0xFFFF;
-  final hi = (v >> 8) & 0xFF;
-  final lo = v & 0xFF;
-  return _frame([0x04, 0x80, 0x02, hi, lo]);
-}
-
-/// Monta um pacote sintético do bloco "BrainWave" completo (assinatura
-/// "20 02"), com todos os campos zerados exceto os passados explicitamente.
-///
-/// PLEN (0x20) e o checksum aqui são reconstrução best-effort: o parser
-/// oficial (ParserBle) nem chega a validar esses dois campos nesse tipo de
-/// pacote — ele reconhece o bloco só pelo prefixo "20 02" e por ter pelo
-/// menos 36 bytes depois dele. Mesmo assim mandamos um checksum coerente com
-/// a fórmula confirmada nos pacotes RAW, para o caso do firmware da aranha
-/// ser mais rigoroso que o parser da tiara.
-List<int> buildBrainWaveFrame({
-  int signal = 0,
-  int attention = 0,
-  int meditation = 0,
-  int ap = 0,
-  int battery = 100,
-  int delta = 0,
-  int theta = 0,
-  int lowAlpha = 0,
-  int highAlpha = 0,
-  int lowBeta = 0,
-  int highBeta = 0,
-  int lowGamma = 0,
-  int middleGamma = 0,
-}) {
-  List<int> band24(int v) {
-    final x = v & 0xFFFFFF;
-    return [(x >> 16) & 0xFF, (x >> 8) & 0xFF, x & 0xFF];
-  }
-
-  final body = <int>[
-    signal & 0xFF,
-    0x83, 0x18, // marcadores cosméticos (código EEG_POWER + vlen=24) — não lidos pelo parser
-    ...band24(delta),
-    ...band24(theta),
-    ...band24(lowAlpha),
-    ...band24(highAlpha),
-    ...band24(lowBeta),
-    ...band24(highBeta),
-    ...band24(lowGamma),
-    ...band24(middleGamma),
-    0x04, attention & 0xFF, // [27]=marcador cosmético, [28]=valor real
-    0x05, meditation & 0xFF, // [29]=marcador cosmético, [30]=valor real
-    0x00, 0x00,
-    ap & 0xFF,
-    0x00,
-    battery & 0xFF,
-  ];
-  assert(body.length == 36);
-  return _frame([0x20, 0x02, ...body]);
-}
-
 /// Um frame decodificado do stream bruto da tiara.
 class DecodedTiaraFrame {
   final String kind; // 'raw' | 'brainwave' | 'gravity' | 'unknown'
@@ -192,11 +127,7 @@ class TiaraFrameDecoder {
     final hex = _hex(f);
     // f = <PLEN> <payload...> <checksum> (sem o "AA AA" nem o "23 23")
     if (f.length >= 5 && f[1] == 0x80 && f[2] == 0x02) {
-      return DecodedTiaraFrame(
-        'raw',
-        {'value': _u16signed(f[3], f[4])},
-        hex,
-      );
+      return DecodedTiaraFrame('raw', {'value': _u16signed(f[3], f[4])}, hex);
     }
     if (f.length >= 38 && f[0] == 0x20 && f[1] == 0x02) {
       final b = f.sublist(2); // os 36 bytes de dados
@@ -298,12 +229,23 @@ List<int>? _patchFrame(
     return [...payload, _checksum(payload)];
   }
 
-  // BrainWave: PLEN(1) + 02(1) + body(36) + checksum(1) = 39 bytes exatos.
+  // BrainWave: PLEN(1) + 02(1) + body(>=36) + checksum(1).
+  // Bug confirmado em captura real (sessão 20/08, docs/FUNCIONAMENTO.md
+  // §11.7): o pacote real vem com 46 bytes, não os 39 que assumíamos (a
+  // tiara manda ~7 bytes extras depois da bateria que nunca decodificamos —
+  // desconhecidos, mas reais). O check antigo (`f.length == 39`) nunca
+  // batia com um pacote de verdade, então o patch nunca disparava: a
+  // atenção/meditação real passava sempre intacta, mesmo com a assistência
+  // ligada — o "bug grave" relatado era esse silêncio, não uma corrupção.
+  // Agora aceita qualquer comprimento >= 38 (igual ao decoder já aceitava)
+  // e preserva TODOS os bytes reais, inclusive os desconhecidos do final —
+  // só sobrescreve os 2 bytes confirmados (atenção/meditação) e recalcula o
+  // checksum sobre o payload completo, do tamanho real que vier.
   if ((forceAttention != null || forceMeditation != null) &&
-      f.length == 39 &&
+      f.length >= 38 &&
       f[0] == 0x20 &&
       f[1] == 0x02) {
-    final payload = List<int>.from(f.sublist(0, 38)); // tudo, menos o checksum
+    final payload = List<int>.from(f.sublist(0, f.length - 1)); // tudo, menos o checksum (último byte)
     if (forceAttention != null) payload[2 + 28] = forceAttention & 0xFF;
     if (forceMeditation != null) payload[2 + 30] = forceMeditation & 0xFF;
     return [...payload, _checksum(payload)];

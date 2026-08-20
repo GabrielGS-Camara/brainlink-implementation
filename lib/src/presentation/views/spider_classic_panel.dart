@@ -251,9 +251,7 @@ class SpiderClassicPanel extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 12),
-            _sweepCard(),
-            const SizedBox(height: 12),
-            _mockInjectorCard(),
+            _replayCard(),
           ],
           const SizedBox(height: 16),
           Row(
@@ -303,128 +301,6 @@ class SpiderClassicPanel extends StatelessWidget {
             ),
           ),
         ],
-      ),
-    );
-  }
-
-  /// Varredura automática pra descobrir o cálculo exato (atenção×meditação)
-  /// que a aranha usa — ver o raciocínio completo no viewmodel e em
-  /// docs/FUNCIONAMENTO.md §11. Roda uma sequência de pontos sozinha; o
-  /// operador só observa a aranha e usa os botões de "Marcar Movimento"
-  /// (card acima) pra registrar o que aconteceu em cada ponto.
-  Widget _sweepCard() {
-    return Card(
-      color: Colors.cyan.shade50,
-      elevation: 4,
-      child: Padding(
-        padding: const EdgeInsets.all(12.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              "🔬 Varredura automática de limiares",
-              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
-            ),
-            const SizedBox(height: 4),
-            const Text(
-              "3 pontos manuais já sugerem um padrão: atenção+meditação "
-              "fica sempre perto de 100 (V1: 35+60=95, V2: 64+37=101, V3: "
-              ">80+<30≈100-110) — a DIFERENÇA (atenção-meditação) parece "
-              "escolher a velocidade dentro disso. As varreduras abaixo "
-              "testam essa hipótese e as alternativas (limiares "
-              "independentes, ou só a diferença sem depender da soma).",
-              style: TextStyle(fontSize: 11, color: Colors.black54),
-            ),
-            const SizedBox(height: 10),
-            if (viewModel.sweepRunning) ...[
-              LinearProgressIndicator(
-                value: viewModel.sweepPointTotal > 0
-                    ? viewModel.sweepPointIndex / viewModel.sweepPointTotal
-                    : null,
-              ),
-              const SizedBox(height: 6),
-              Text(
-                viewModel.sweepStatus ?? "Rodando...",
-                style: const TextStyle(
-                  fontWeight: FontWeight.bold,
-                  fontSize: 12,
-                ),
-              ),
-              const SizedBox(height: 8),
-              ElevatedButton.icon(
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.red.shade100,
-                  foregroundColor: Colors.red,
-                ),
-                onPressed: viewModel.stopSweep,
-                icon: const Icon(Icons.stop),
-                label: const Text("Parar varredura"),
-              ),
-            ] else
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  ElevatedButton.icon(
-                    onPressed: () => viewModel.runDiagonalSweep(),
-                    icon: const Icon(Icons.timeline),
-                    label: const Text(
-                      "1. Diagonal (soma≈100, varia diferença)",
-                    ),
-                  ),
-                  ElevatedButton.icon(
-                    onPressed: () => viewModel.runSumInvarianceCheck(),
-                    icon: const Icon(Icons.compare_arrows),
-                    label: const Text("2. A soma importa? (diff=27 fixo)"),
-                  ),
-                  ElevatedButton.icon(
-                    onPressed: () => viewModel.runAttentionSweep(),
-                    icon: const Icon(Icons.trending_up),
-                    label: const Text("3. Só atenção (meditação=37 fixa)"),
-                  ),
-                  ElevatedButton.icon(
-                    onPressed: () => viewModel.runMeditationSweep(),
-                    icon: const Icon(Icons.trending_down),
-                    label: const Text("4. Só meditação (atenção=64 fixa)"),
-                  ),
-                  OutlinedButton.icon(
-                    onPressed: () => viewModel.runStaleDataTest(),
-                    icon: const Icon(Icons.timer),
-                    label: const Text(
-                      "5. Teste de estagnação (dado 100% parado)",
-                    ),
-                  ),
-                ],
-              ),
-            const Divider(height: 20),
-            Row(
-              children: [
-                Switch(
-                  value: viewModel.jitterEnabled,
-                  onChanged: viewModel.setJitterEnabled,
-                  activeThumbColor: Colors.cyan.shade800,
-                ),
-                Expanded(
-                  child: Text(
-                    "Jitter (± ${viewModel.jitterAmount}) em todo valor "
-                    "'segurado' — sem isso o dado fica 100% estático e ela "
-                    "para de andar depois de um tempo (achado do teste 5).",
-                    style: const TextStyle(fontSize: 11),
-                  ),
-                ),
-              ],
-            ),
-            if (viewModel.jitterEnabled)
-              Slider(
-                value: viewModel.jitterAmount.toDouble(),
-                min: 1,
-                max: 15,
-                divisions: 14,
-                label: "±${viewModel.jitterAmount}",
-                onChanged: (v) => viewModel.setJitterAmount(v.round()),
-              ),
-          ],
-        ),
       ),
     );
   }
@@ -488,12 +364,10 @@ class SpiderClassicPanel extends StatelessWidget {
     );
   }
 
-  /// Injetor de pacotes sintéticos — manda pacotes construídos à mão direto
-  /// pra aranha, SEM a tiara conectada, pra descobrir por tentativa e erro
-  /// qual campo dispara o movimento (ver tiara_protocol.dart e
-  /// docs/FUNCIONAMENTO.md). Os pacotes respeitam o framing real
-  /// (sync/checksum/trailer) em vez de bytes soltos aleatórios.
-  Widget _mockInjectorCard() {
+  /// Reenvia um bloco de bytes REAIS já capturados da tiara (sem edição
+  /// nenhuma) — útil pra validar que o canal de fato entrega tráfego
+  /// genuíno pra aranha. Nada aqui é sintético/mockado.
+  Widget _replayCard() {
     return Card(
       color: Colors.amber.shade50,
       elevation: 4,
@@ -503,136 +377,14 @@ class SpiderClassicPanel extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text(
-              "🧪 Injetor de Pacotes (mock, sem tiara)",
+              "🔁 Reenviar captura real",
               style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
             ),
             const SizedBox(height: 4),
             const Text(
-              "Manda pacotes sintéticos direto pra aranha, no formato real "
-              "do protocolo (framing + checksum), pra testar qual campo "
-              "dispara o movimento — sem precisar da tiara conectada.",
-              style: TextStyle(fontSize: 11, color: Colors.black54),
-            ),
-            const SizedBox(height: 10),
-            Text(
-              "Atenção sintética: ${viewModel.mockAttentionValue}",
-              style: const TextStyle(fontWeight: FontWeight.bold),
-            ),
-            Slider(
-              value: viewModel.mockAttentionValue.toDouble(),
-              min: 0,
-              max: 100,
-              divisions: 100,
-              label: "${viewModel.mockAttentionValue}",
-              onChanged: (v) => viewModel.setMockAttention(v.round()),
-            ),
-            Text(
-              "Meditação sintética: ${viewModel.mockMeditationValue}",
-              style: const TextStyle(fontWeight: FontWeight.bold),
-            ),
-            Slider(
-              value: viewModel.mockMeditationValue.toDouble(),
-              min: 0,
-              max: 100,
-              divisions: 100,
-              label: "${viewModel.mockMeditationValue}",
-              onChanged: (v) => viewModel.setMockMeditation(v.round()),
-            ),
-            const SizedBox(height: 6),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                ElevatedButton.icon(
-                  onPressed: viewModel.sendMockBrainWave,
-                  icon: const Icon(Icons.send),
-                  label: const Text("Enviar 1 pacote"),
-                ),
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Text("Stream contínuo (2/s)"),
-                    Switch(
-                      value: viewModel.mockStreaming,
-                      onChanged: viewModel.toggleMockStream,
-                      activeThumbColor: Colors.amber.shade800,
-                    ),
-                  ],
-                ),
-              ],
-            ),
-            const Divider(height: 20),
-            const Text(
-              "Presets de banda EEG (alpha/beta) — testa se o gatilho é "
-              "derivado das bandas em vez do byte de atenção já pronto",
-              style: TextStyle(fontSize: 11, color: Colors.black54),
-            ),
-            const SizedBox(height: 6),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                ElevatedButton.icon(
-                  onPressed: () => viewModel.sendMockBandPreset(foco: true),
-                  icon: const Icon(Icons.center_focus_strong),
-                  label: const Text("Preset 'Foco' (beta↑ alpha↓)"),
-                ),
-                ElevatedButton.icon(
-                  onPressed: () => viewModel.sendMockBandPreset(foco: false),
-                  icon: const Icon(Icons.self_improvement),
-                  label: const Text("Preset 'Relaxado' (alpha↑ beta↓)"),
-                ),
-              ],
-            ),
-            const Divider(height: 20),
-            Text(
-              "Amplitude da onda RAW sintética: ±${viewModel.mockRawAmplitude}",
-              style: const TextStyle(fontWeight: FontWeight.bold),
-            ),
-            const Text(
-              "É o VALOR numérico dentro do pacote (a 'força' da onda que a "
-              "tiara diz ter captado) — não é potência de rádio Bluetooth, "
-              "não muda alcance nem a distância de conexão com a aranha. "
-              "Só deixa esse número maior ou menor pra testar se ela reage "
-              "a picos grandes de onda bruta.",
-              style: TextStyle(fontSize: 11, color: Colors.black45),
-            ),
-            Slider(
-              value: viewModel.mockRawAmplitude.toDouble(),
-              min: 100,
-              max: 8000,
-              divisions: 79,
-              label: "±${viewModel.mockRawAmplitude}",
-              onChanged: (v) => viewModel.setMockRawAmplitude(v.round()),
-            ),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                OutlinedButton.icon(
-                  onPressed: () => viewModel.sendMockRawBurst(),
-                  icon: const Icon(Icons.graphic_eq),
-                  label: const Text("1 rajada RAW (30 amostras)"),
-                ),
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Text("Stream RAW contínuo (5/s)"),
-                    Switch(
-                      value: viewModel.mockRawStreaming,
-                      onChanged: viewModel.toggleMockRawStream,
-                      activeThumbColor: Colors.deepOrange,
-                    ),
-                  ],
-                ),
-              ],
-            ),
-            const Divider(height: 20),
-            const Text(
-              "Reenviar um bloco REAL já capturado da tiara (sem edição "
-              "nenhuma) — mesmo que não tenha atenção alta, é tráfego "
-              "genuíno (framing/checksum reais), então serve como teste de "
-              "validação extra além dos pacotes sintéticos acima.",
+              "Reenvia o bloco de bytes REAIS mais recente capturado da "
+              "tiara (sem edição nenhuma) — serve pra validar que o canal "
+              "entrega tráfego genuíno pra aranha.",
               style: TextStyle(fontSize: 11, color: Colors.black54),
             ),
             const SizedBox(height: 6),

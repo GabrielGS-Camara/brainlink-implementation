@@ -914,6 +914,330 @@ sinal num valor fixo** — aplicar um ganho/curva sobre a leitura real
 mantém a exigência de esforço real (só fica proporcionalmente mais fácil
 de cruzar o limiar), em vez de eliminar a exigência por completo.
 
+### 11.4 Atualização (20/08) — teste de estagnação e varredura diagonal reais, e um bug de jitter descoberto no processo
+
+O usuário rodou, na mesma sessão e conexão (**canal SDK/canal 2**, confirmado
+pelo prefixo `[SDK] ➡️ Enviado via BluetoothChatService oficial` em toda
+linha do log — o canal 1/RAW não foi tocado nesta rodada), primeiro o
+`runStaleDataTest()` (att=64, med=37, 100% estático) por 28s, depois o
+`runDiagonalSweep()` completo (21 pontos).
+
+**Resultado 1 — o teste de estagnação nunca andou, nem uma vez.** Isso é
+importante: 64/37 é exatamente o combo "V2" que o próprio usuário achou
+funcionando na sessão anterior (por tentativa e erro, arrastando sliders).
+Mandado de forma 100% estática desde o primeiro pacote, ele nunca disparou
+— nem por um instante antes de qualquer possível "estagnação". Conclusão:
+**não é só que dado parado faz ela PARAR — parece que dado parado nunca
+consegue nem COMEÇAR a andar.** Isso aponta pra um gate de variação
+(derivada/mudança entre pacotes consecutivos), não só de nível.
+
+**Resultado 2 — bug descoberto: o jitter da varredura estava muito maior
+que os ±4 documentados.** Decodificando os bytes reais enviados durante a
+varredura diagonal (índice 32 = atenção, índice 34 = meditação, contando a
+partir do "AA AA" inicial — conferido byte a byte contra o `att=64/med=37`
+do teste de estagnação), o valor "segurado" oscilou muito mais do que
+deveria — ex.: no ponto 15 (base atenção=70/meditação=30), os pacotes
+reais mandados tiveram atenção 56-70 e meditação 20-43, uma oscilação de
+até ±14, não ±4. Causa: `_runSweepPoints` usava o mesmo campo
+`jitterAmount` do injetor mock (compartilhado, ajustável pelo slider da UI)
+em vez de um jitter próprio — se esse slider tivesse sido deixado alto de
+um teste anterior, toda varredura de precisão saía contaminada sem
+nenhum aviso. **Corrigido**: `_runSweepPoints` agora usa `_sweepJitter`,
+um jitter fixo e independente (padrão ±5), que não depende mais do slider
+do injetor mock (`spider_classic_viewmodel.dart`).
+
+**Resultado 3 — mesmo com essa contaminação, um padrão real aparece.**
+Nenhum movimento foi marcado do ponto 1 ao 14 (diff -100 a +20, atenção
+0-65) nem dos pontos 19-21 (diff 80-100, atenção base 90-100, meditação
+base 10-0). Movimento (V1→V2, depois V3) só apareceu nos pontos 15-18
+(diff 40-70, atenção base 70-85, meditação base 15-30) — e sempre de forma
+breve (~1-2s), nunca sustentado, aparecendo alguns segundos DENTRO do
+período de espera de cada ponto (nunca no instante exato da transição).
+
+Um detalhe chamou atenção ao decodificar os bytes ponto a ponto: **nos
+pontos 15-18 (que reagiram), a meditação jitterada nunca caiu a exatamente
+0** (mínimo observado: 8). **Nos pontos 19-21 (que NÃO reagiram, apesar de
+atenção ainda mais alta), várias amostras bateram meditação=0 exatamente**
+(`04 64 05 00`, `04 58 05 00` etc.). Hipótese nova, ainda não testada
+isoladamente: **meditação=0 pode ser tratado como leitura inválida/sem
+sinal e descartado** (padrão comum em firmware de EEG — 0 é usado como
+sentinela de "ainda não calculado"), o que explicaria a aranha "sumir"
+justamente na ponta mais extrema, que pela lógica simples de
+"atenção alta + meditação baixa" deveria ser a melhor, não a pior.
+
+**Ações tomadas nesta atualização:**
+1. Corrigido o bug de jitter (`_sweepJitter` dedicado, ±5 fixo).
+2. `runMeditationSweep`: mudado o padrão de `fixedAtt` de 64 → 80, porque
+   64 sozinho parece ficar abaixo do limiar real de atenção (o teste de
+   estagnação com 64/37 nunca andou, e a varredura diagonal só reagiu a
+   partir de atenção~70) — rodar esse teste com fixedAtt=64 arriscava não
+   testar a meditação de verdade (nada anda em nenhum ponto, atenção baixa
+   demais pra qualquer meditação importar).
+
+**Próximos testes recomendados, nessa ordem:**
+1. `runAttentionSweep` (meditação fixa=37) — agora com jitter controlado,
+   deve revelar o limiar real de atenção sem o ruído desta rodada.
+2. `runMeditationSweep` (atenção fixa=80, novo padrão) — olhar
+   especificamente se o movimento desaparece perto de meditação=0 vs.
+   meditação=10-20, pra confirmar ou descartar a hipótese do "gate de
+   meditação=0".
+3. Não é necessário repetir o teste de estagnação — o resultado (dado
+   parado nunca anda) já está confirmado e é consistente com a varredura
+   (movimento só apareceu depois de alguns segundos de jitter acumulado,
+   nunca no instante exato de um valor nôvo e fixo).
+
+### 11.5 Atualização (20/08, rodada 2) — os testes recomendados rodaram e vieram quase todos vazios; pivô pra "amplificar variação" em vez de "achar o limiar exato"
+
+O usuário rodou, na sequência, `runSumInvarianceCheck`, `runAttentionSweep`
+(meditação fixa=37, 0-100), `runMeditationSweep` (atenção fixa=80, 0-100) e
+`runDiagonalSweep` de novo — dessa vez com jitter próximo do documentado
+(±5, não o ±15-20 contaminado da rodada anterior — confirmado decodificando
+os bytes: ex. no ponto atenção=50 da varredura isolada, os valores reais
+oscilaram 48-55). **Resultado: quase nenhum movimento.** A checagem de
+soma (3 pontos) não reagiu em nenhum. A varredura de atenção isolada (11
+pontos, atenção 0→100, meditação sempre 37) **não reagiu em NENHUM ponto**
+— nem nos que a varredura diagonal anterior tinha sugerido como "quentes"
+(atenção 70-90). A varredura de meditação isolada (atenção fixa=80, 11
+pontos) só reagiu UMA vez, em meditação=10 (Velocidade 3, ~1,6s) — nada em
+0, 20, 30 ou além.
+
+**Confirmado pelo usuário** (conhecimento próprio do protocolo, não
+derivado só desta sessão): **atenção OU meditação = 0 é tratado como dado
+nulo/inválido** pelo protocolo — não é "meditação baixa", é "sem leitura".
+Isso bate com o que já tínhamos observado na varredura diagonal anterior
+(seção 11.4) e generaliza pra atenção também.
+
+O padrão mais forte que emerge de TODOS os testes até agora, olhado em
+conjunto:
+
+| Modo de envio | Variação entre pacotes | Andou? |
+|---|---|---|
+| Teste de estagnação (att=64/med=37, zero jitter) | nenhuma | nunca |
+| Varreduras com jitter pequeno (±5, esta rodada) | pequena, aleatória | quase nunca (1 blip em ~25 pontos testados) |
+| Varredura diagonal contaminada (±15-20, sessão anterior) | grande, aleatória | várias vezes |
+| Slider manual arrastado à mão (injetor mock) | grande, DIRECIONAL, rápida | funciona de forma confiável (relatado pelo usuário) |
+
+A leitura mais simples que explica as quatro linhas: **o que dispara
+movimento não é (só) o NÍVEL de atenção/meditação — é a MAGNITUDE da
+variação entre pacotes consecutivos.** Dado 100% parado nunca anda. Jitter
+pequeno quase nunca anda. Jitter grande (mesmo aleatório, sem direção)
+anda de vez em quando. Um arrasto manual de slider — que gera saltos
+grandes e rápidos — anda de forma confiável. Isso também explica por que
+as varreduras "isoladas" (uma variável fixa, jitter pequeno na outra)
+vieram quase vazias: elas testam exatamente a condição mais parecida com
+"parado" que existe (uma variável 100% fixa, a outra oscilando pouco).
+
+**Implicação prática — não precisamos mais achar o limiar exato pra
+ajudar.** Se o gatilho real depende de variação (não só de nível), a
+amplificação certa não é "empurrar o valor pra uma zona fixa" — é
+**amplificar a variação que a leitura REAL da tiara já tem**, que por
+definição nunca é 100% parada (é um sinal de EEG de verdade). Isso tem uma
+vantagem a mais: não precisa saber o número exato do limiar da aranha pra
+funcionar, e satisfaz de graça o pedido original do usuário ("ajudar sem
+fazer andar constantemente") — sem esforço real (sinal parado/quase
+parado) não tem variação real pra amplificar, então não amplifica quase
+nada.
+
+**Implementado** (depois substituído — ver §11.6 abaixo): um modo
+"🔊 Amplificação" que multiplicava o desvio da leitura real em relação a
+uma média móvel, com ganho ajustável pelo usuário (×1-×8). O usuário
+testou com a tiara real e reportou que **não estava ajudando ativamente**
+— o ganho editável não convergia pra nada confiável, e o pedido foi trocar
+por uma abordagem mais direta.
+
+### 11.6 Atualização (20/08, rodada 3) — troca de "amplificar desvio" por "ajustar pro valor confirmado mais próximo", e limpeza de todo o código de teste/mock
+
+Pedido do usuário: nada de multiplicador editável — em vez disso, ler a
+onda real da tiara e, **se estiver perto o bastante de uma combinação já
+CONFIRMADA por observação direta** (não mais um cálculo com ganho), ajustar
+pra esse valor exato e mandar pra aranha. E remover toda a infraestrutura
+de teste que manda dado mockado — ela já cumpriu o papel de achar os 3
+pontos confirmados; não faz mais sentido manter no app de produção.
+
+**Removido por completo** (era só ferramenta de exploração, não faz parte
+do produto final):
+- `SpiderClassicViewModel`: injetor de pacotes sintéticos inteiro
+  (`mockAttentionValue`/`mockMeditationValue`/bandas/`mockStreaming`/
+  `mockRawAmplitude`/`mockRawStreaming` e seus setters/`sendMockRawBurst`/
+  `toggleMockRawStream`), o sistema de jitter do injetor
+  (`jitterEnabled`/`jitterAmount`/`_jitter`), e toda a varredura automática
+  (`_runSweepPoints`/`_sweepJitter`/`runDiagonalSweep`/
+  `runSumInvarianceCheck`/`runAttentionSweep`/`runMeditationSweep`/
+  `runStaleDataTest` e os campos de progresso `sweepRunning`/`sweepStatus`/
+  etc.).
+- `spider_classic_panel.dart`: os cards "🔬 Varredura automática de
+  limiares" e "🧪 Injetor de Pacotes" inteiros. O botão de reenviar bytes
+  REAIS capturados (não mockado) foi preservado, só realocado num card
+  próprio e menor (`_replayCard`).
+- `tiara_protocol.dart`: `buildRawFrame`/`buildBrainWaveFrame` (só existiam
+  pra montar pacotes sintéticos) e o helper interno `_frame` que só eles
+  usavam. `patchTiaraStream`/`_patchFrame`/`TiaraFrameDecoder` continuam —
+  são os únicos usados pelo caminho real (ler tiara → editar → reenviar).
+
+**Novo mecanismo** — "🎯 Assistência automática" (substitui o card
+"🔊 Amplificação"), em `TiaraRawViewModel.autoAssistEnabled`: SEM
+multiplicador nenhum pra calibrar. Mantém uma lista fixa dos 3 pontos já
+confirmados por observação direta (não mais estimativa):
+
+```
+V1: atenção=35 meditação=60
+V2: atenção=64 meditação=37
+V3: atenção=85 meditação=20
+```
+
+A cada leitura real de atenção+meditação (ambas > 0 — 0 continua sendo
+tratado como "sem leitura", não entra na comparação), calcula a distância
+até cada um dos 3 pontos; se a mais próxima estiver dentro da tolerância
+(±15 em cada eixo — `_assistTolerance`), ajusta os dois valores pro ponto
+exato (`_applyAutoAssist` em `tiara_raw_viewmodel.dart`) e manda isso pra
+aranha via o `patchTiaraStream` cirúrgico já existente (só sobrescreve os
+2 bytes, recalcula checksum, preserva o resto do pacote real). Fora do
+alcance de todos os 3 pontos, a leitura real passa sem nenhuma edição —
+nunca inventa um valor fora do que já foi confirmado.
+
+**Próximo passo**: testar com a tiara real conectada — ligar
+"Retransmissão pra aranha" e "🎯 Assistência automática", e observar o
+card (mostra em tempo real: atenção/meditação reais → qual ponto (se
+algum) foi usado no ajuste). Se ±15 for tolerância demais/de menos pra
+"ajudar sem andar constantemente", é o próximo parâmetro a recalibrar —
+mas note que não é mais exposto na UI de propósito (pedido do usuário:
+nada editável), então qualquer ajuste de tolerância precisa ser feito no
+código (`_assistTolerance` em `tiara_raw_viewmodel.dart`).
+
+### 11.7 Atualização (20/08, rodada 4) — bug real encontrado: o pacote BrainWave de verdade não tem 39 bytes, tem 46 — o patch nunca disparava
+
+O usuário testou a assistência automática com a tiara real e reportou
+"erro grave": nenhum dado completo de 505 bytes, e todo sinal (real ou com
+assistência) saindo com atenção=0/meditação=0 pra aranha. Analisando
+`docs/logs.md` byte a byte:
+
+**Achado 1 — não é bug, é como BLE sempre funcionou aqui.** Os "505 bytes"
+nunca foram um tamanho garantido — era só quanto uma notificação BLE
+específica trouxe, faz várias sessões. Os chunks reais variam bastante
+(14, 50, 64, 92 bytes vistos nesta captura), porque o Android entrega
+notificações BLE em pedaços do tamanho que o MTU da conexão permitir, não
+em blocos fixos. Nada quebrado aqui.
+
+**Achado 2 — bug real e confirmado: o pacote BrainWave de verdade tem 46
+bytes, não 39.** Contando os bytes de um pacote `20 02` genuíno do log
+(`sed -n` + `tr`/`wc` no arquivo, sem depender de suposição):
+
+```
+20 02 C8 83 18 00×24 04 00 05 00 00 06 00 07 5F 08 55 00 11 20 08 00 55
+```
+
+46 bytes ao todo — sinal (`C8`=200) e bateria (`5F`=95) batem exatamente
+nos offsets que já sabíamos (confirma que o INÍCIO do layout está certo),
+mas depois da bateria a tiara manda **~7 bytes extras que nunca
+decodificamos** antes de chegar no que assumimos ser o checksum. A
+função `buildBrainWaveFrame` (já removida, §11.6) tinha sido calibrada só
+com pacotes SINTÉTICOS nossos, então ninguém tinha confirmado o tamanho
+real de um pacote `20 02` genuíno até agora — os pacotes RAW (`80 02`, 6
+bytes) foram checksum-confirmados cedo no projeto, mas o BrainWave nunca.
+
+**Consequência**: `_patchFrame` (`tiara_protocol.dart`) exigia
+`f.length == 39` pra reconhecer e editar um pacote BrainWave. Um pacote
+real de 46 bytes NUNCA batia nessa condição — `_patchFrame` sempre
+devolvia `null`, e `patchTiaraStream` (corretamente, por segurança)
+deixava o pacote passar 100% intacto. Resultado: com "🎯 Assistência
+automática" ligada, o patch **nunca disparava silenciosamente**, mesmo
+quando o achado (att/med perto de V1/V2/V3) deveria ter ajustado o valor —
+a leitura real sempre saía sem edição nenhuma. Esse era o "erro grave".
+
+**Achado 3 — nesta sessão específica, sinal=200 o tempo todo (contato
+ruim/nenhum).** Sobre os ~30s em que a assistência ficou ligada, TODO
+pacote BrainWave decodificado mostrou atenção=0 E meditação=0 (conferido
+filtrando o log inteiro). `signal=0` é sinal ótimo, `signal=200` é o pior
+valor possível (sem contato) — ou seja, mesmo com o bug corrigido, essa
+sessão específica não teria dado pra assistência agir em cima de nada,
+porque a tiara não estava captando sinal real nenhum (0 é tratado como
+"sem leitura", ver §11.5/§11.6). Vale reencostar bem a tiara e conferir
+`sinal=` no log antes do próximo teste.
+
+**Corrigido** em `_patchFrame` (`tiara_protocol.dart`): a condição do
+BrainWave agora aceita `f.length >= 38` (igual ao que o decoder já
+aceitava) em vez de exigir exatamente 39, e o payload preservado antes de
+recalcular o checksum agora é `f.sublist(0, f.length - 1)` (tudo menos o
+último byte, seja qual for o tamanho real) em vez do `sublist(0, 38)`
+fixo antigo — isso preserva os bytes extras desconhecidos do final em vez
+de silenciosamente descartá-los. Os offsets de atenção/meditação
+(`payload[2+28]`/`payload[2+30]`) continuam os mesmos, já confirmados
+certos batendo com sinal/bateria no mesmo pacote real.
+
+**Ressalva que fica em aberto**: o checksum recalculado pro pacote de 46
+bytes usa a MESMA fórmula já confirmada nos pacotes RAW (soma
+complementada), só que a fórmula NUNCA foi confirmada contra um checksum
+real de pacote BrainWave — tentei validar por força bruta (todas as
+janelas de bytes, soma normal e XOR) contra o último byte do pacote real
+capturado e nenhuma bateu, então o "checksum" desse tipo de pacote pode
+ser outra coisa (ou nem ser validado pela aranha — o comentário original
+já dizia isso). Não é um retrocesso: antes o pacote nunca era tocado; agora
+é editado com um checksum best-effort, na pior hipótese ignorado pela
+aranha (mesmo comportamento de antes pros outros campos), na melhor
+hipótese aceito. Se a aranha passar a rejeitar pacotes BrainWave
+especificamente depois desse fix, é o próximo lugar pra olhar.
+
+### 11.8 Atualização (20/08, rodada 5) — não era bug: os dois interruptores nunca ficaram ligados ao mesmo tempo
+
+Usuário reportou que sinais reais faziam a aranha andar, mas com a
+assistência ligada não. Olhando a ordem exata dos eventos de LIGADA/
+DESLIGADA no `docs/logs.md` atualizado:
+
+```
+15:04:10.057  Assistência automática LIGADA
+15:04:42.538  Assistência automática DESLIGADA
+15:04:42.837  Retransmissão pra aranha LIGADA   ← 0,3s DEPOIS da assistência já ter desligado
+15:05:05.770  Retransmissão pra aranha DESLIGADA
+15:05:08.056  Assistência automática LIGADA de novo (retransmissão nunca mais foi religada; tiara desconecta logo depois)
+```
+
+**Os dois nunca estiveram ligados ao mesmo tempo em nenhum instante desta
+sessão.** Quando a assistência estava ligada, a retransmissão estava
+desligada (nada saía pra aranha, ajustado ou não). Quando a retransmissão
+ligou, a assistência já tinha sido desligada — o que saiu nessa janela foi
+passthrough puro, sem nenhum ajuste. E de fato, nessa janela várias
+leituras reais chegaram bem perto de V2 por conta própria (ex.:
+`atenção=64 meditação=47` às 15:04:31, `atenção=64 meditação=44` às
+15:04:38) — plausível que isso sozinho tenha bastado pra andar, sem
+precisar de nenhuma assistência.
+
+Não é um bug de lógica — é só fácil de perder o controle tendo dois
+switches independentes (retransmissão em `spider`, assistência em
+`tiara`) que os dois precisam estar ligados juntos pra assistência fazer
+qualquer diferença observável. **Adicionado**: aviso vermelho no card
+"🎯 Assistência automática" (`tiara_raw_panel.dart`) que aparece sempre que
+`autoAssistEnabled == true` e `relayToSpider == false` — antes desse
+estado silencioso confundir de novo.
+
+### 11.9 Atualização (20/08, rodada 6) — nova opção independente: assistência diagonal (só foco)
+
+Pedido do usuário: sem mexer no que já funciona (assistência por pontos
+V1/V2/V3, seção 11.6), adicionar uma opção A MAIS, que pode ser ligada ou
+não, que usa só a atenção real ("foco") como base e calcula a meditação a
+mandar (mockada) sabendo que isso ativa o movimento — apontando a
+varredura diagonal (§11.2/§11.4) como a que mais deu resultado.
+
+**Implementado** em `TiaraRawViewModel.diagonalAssistEnabled` — card
+"📐 Assistência diagonal (só foco)" na aba Tiara, logo abaixo da
+assistência existente, sem alterar nem uma linha do código dela:
+
+- A cada leitura real de atenção (>0, mesma regra de "0=sem leitura"),
+  calcula `meditação = (100 − atenção).clamp(1, 99)` — a relação
+  soma≈100 confirmada como a que mais reagiu na varredura diagonal.
+- A atenção que sai pra aranha é sempre a REAL, nunca mexida — só a
+  meditação é substituída pela calculada (mockada).
+- Como a meditação é derivada de uma leitura real (que nunca é 100%
+  parada), o valor calculado também nunca fica estático — não esbarra no
+  achado de "dado parado nunca anda" (§11.4/§11.5) sem precisar de jitter
+  manual nenhum.
+- Independente da assistência por pontos: os dois toggles existem em
+  paralelo (`autoAssistEnabled` e `diagonalAssistEnabled`), cada um pode
+  ser ligado sozinho. Se os dois estiverem ligados ao mesmo tempo, a
+  assistência por pontos (🎯) tem prioridade no código — só um patch é
+  aplicado por pacote, nunca os dois. Tem o mesmo aviso vermelho de
+  "retransmissão desligada" que a assistência por pontos já tinha
+  (§11.8), pra não cair na mesma confusão de novo.
+
 ## 12. Resumo de UUIDs e identificadores confirmados
 
 | Identificador                                                           | Valor                                  | Fonte                             | Confirmado no `.jar`?                       |

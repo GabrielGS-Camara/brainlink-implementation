@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -81,27 +80,75 @@ class TiaraRawViewModel extends ChangeNotifier {
   static const int _maxRawByteHistory = 8000;
   final List<int> rawByteHistory = [];
 
-  // Edição AO VIVO do relay: em vez de reencaminhar os bytes exatamente como
-  // chegaram, sobrescreve só o(s) campo(s) escolhido(s) (ver
-  // tiara_protocol.dart:patchTiaraStream) preservando o resto do pacote real
-  // intacto — é a implementação de "leia o que a tiara manda e edite os
-  // valores antes de reenviar pra aranha".
-  bool editEnabled = false;
-  int? forceAttention;
-  int? forceMeditation;
-  double? rawGain;
+  // Assistência automática: lê a atenção/meditação REAIS da tiara e, se
+  // estiverem perto o bastante de uma das 3 combinações já CONFIRMADAS por
+  // observação direta (docs/FUNCIONAMENTO.md §11 — achadas olhando a aranha
+  // andar de verdade, não simuladas), ajusta pros valores exatos que fazem
+  // ela andar e manda isso pra aranha. Longe de qualquer combinação
+  // conhecida, manda a leitura real sem mexer — nunca inventa um valor.
+  // Sem multiplicador nenhum pra calibrar: só os 3 pontos que já sabemos
+  // que funcionam.
+  bool autoAssistEnabled = false;
+  static const List<({int att, int med, String label})> _knownGoodTargets = [
+    (att: 35, med: 60, label: "V1"),
+    (att: 64, med: 37, label: "V2"),
+    (att: 85, med: 20, label: "V3"),
+  ];
+  static const int _assistTolerance = 15;
+  int? _assistForceAttention;
+  int? _assistForceMeditation;
+  String? _assistActiveTarget;
+  int? get debugAssistAttention => _assistForceAttention;
+  int? get debugAssistMeditation => _assistForceMeditation;
+  String? get debugAssistTarget => _assistActiveTarget;
 
-  // Achado do usuário testando o injetor mock: se a aranha recebe o MESMO
-  // dado por tempo demais, ela PARA (provável watchdog de "sinal parado").
-  // Como aqui o valor forçado é uma constante (forceAttention/Meditation),
-  // sem isso o campo de atenção sairia idêntico em TODO pacote BrainWave
-  // real que passar — por isso aplicamos um jitterzinho no valor forçado a
-  // cada pacote, em vez de escrever a constante crua.
-  final math.Random _rng = math.Random();
-  int _jitterForce(int base) {
-    const amount = 4;
-    final delta = _rng.nextInt(amount * 2 + 1) - amount;
-    return (base + delta).clamp(0, 100);
+  /// Se (att, med) está perto o bastante de algum ponto confirmado, ajusta
+  /// os campos de override pra ESSE ponto exato; senão limpa os overrides
+  /// (o relay deixa a leitura real passar intacta).
+  void _applyAutoAssist(int att, int med) {
+    ({int att, int med, String label})? closest;
+    var closestDist = 1 << 30;
+    for (final target in _knownGoodTargets) {
+      final dAtt = (att - target.att).abs();
+      final dMed = (med - target.med).abs();
+      if (dAtt > _assistTolerance || dMed > _assistTolerance) continue;
+      final dist = dAtt + dMed;
+      if (dist < closestDist) {
+        closestDist = dist;
+        closest = target;
+      }
+    }
+    if (closest != null) {
+      _assistForceAttention = closest.att;
+      _assistForceMeditation = closest.med;
+      _assistActiveTarget = closest.label;
+    } else {
+      _assistForceAttention = null;
+      _assistForceMeditation = null;
+      _assistActiveTarget = null;
+    }
+  }
+
+  // Modo alternativo — INDEPENDENTE do "🎯 Assistência automática" acima
+  // (não mexe em nada do que já existe; só mais uma opção que liga/desliga
+  // por conta própria). Em vez de só ajustar perto dos 3 pontos confirmados,
+  // usa SÓ a atenção real (o "foco") como base e calcula a meditação a
+  // mandar (mockada) pela relação da VARREDURA DIAGONAL — a que mais deu
+  // resultado nos testes de calibração (§11.2/§11.4): soma
+  // atenção+meditação ≈ 100, ou seja `meditação = 100 - atenção`. A atenção
+  // que sai é sempre a real (nunca mexida); só a meditação é calculada.
+  // Como parte de uma leitura real (que nunca fica 100% parada), o valor
+  // calculado também nunca fica estático — não esbarra no achado de que
+  // dado parado nunca faz ela andar (§11.4/§11.5).
+  bool diagonalAssistEnabled = false;
+  int? _diagonalForceMeditation;
+  int? get debugDiagonalMeditation => _diagonalForceMeditation;
+
+  /// Deriva a meditação a mandar a partir da atenção real, pela relação
+  /// soma≈100 da varredura diagonal. Clamp em 1-99 (nunca 0 nem 100 — ver
+  /// achado de que atenção/meditação=0 é tratado como leitura nula).
+  void _applyDiagonalAssist(int att) {
+    _diagonalForceMeditation = (100 - att).clamp(1, 99);
   }
 
   List<ScanResult> scanResults = [];
@@ -246,6 +293,18 @@ class TiaraRawViewModel extends ChangeNotifier {
           lastAttention = frame.fields['attention']?.toInt();
           lastMeditation = frame.fields['meditation']?.toInt();
           lastBattery = frame.fields['battery']?.toInt();
+          // 0 é tratado pelo protocolo como "sem leitura" (confirmado pelo
+          // usuário) — não entra na comparação com os pontos conhecidos,
+          // só mantém o último override válido.
+          if (lastAttention != null &&
+              lastAttention! > 0 &&
+              lastMeditation != null &&
+              lastMeditation! > 0) {
+            _applyAutoAssist(lastAttention!, lastMeditation!);
+          }
+          if (lastAttention != null && lastAttention! > 0) {
+            _applyDiagonalAssist(lastAttention!);
+          }
           _debugLog(
             "🧠 BrainWave decodificado: sinal=$lastSignal atenção=$lastAttention "
             "meditação=$lastMeditation bateria=$lastBattery | ${frame.hex}",
@@ -274,16 +333,14 @@ class TiaraRawViewModel extends ChangeNotifier {
     if (relayToSpider) {
       final spider = spiderClassicViewModel;
       if (spider != null && spider.canRelay) {
-        final toSend = editEnabled
+        final toSend = autoAssistEnabled
             ? patchTiaraStream(
                 bytes,
-                forceAttention:
-                    forceAttention != null ? _jitterForce(forceAttention!) : null,
-                forceMeditation: forceMeditation != null
-                    ? _jitterForce(forceMeditation!)
-                    : null,
-                rawGain: rawGain,
+                forceAttention: _assistForceAttention,
+                forceMeditation: _assistForceMeditation,
               )
+            : diagonalAssistEnabled
+            ? patchTiaraStream(bytes, forceMeditation: _diagonalForceMeditation)
             : bytes;
         spider.relay(toSend);
       } else if (_lastRelayWarnAt == null ||
@@ -299,7 +356,8 @@ class TiaraRawViewModel extends ChangeNotifier {
   }
 
   void _notifyThrottled(DateTime now) {
-    if (_lastNotifyAt == null || now.difference(_lastNotifyAt!) >= _notifyThrottle) {
+    if (_lastNotifyAt == null ||
+        now.difference(_lastNotifyAt!) >= _notifyThrottle) {
       _lastNotifyAt = now;
       notifyListeners();
     }
@@ -319,35 +377,42 @@ class TiaraRawViewModel extends ChangeNotifier {
     relayToSpider = value;
     _log(
       value
-          ? "=== Retransmissão pra aranha LIGADA (bytes crus, sem reconstrução) ==="
+          ? "=== Retransmissão pra aranha LIGADA ==="
           : "=== Retransmissão pra aranha DESLIGADA ===",
     );
     notifyListeners();
   }
 
-  void toggleEdit(bool value) {
-    editEnabled = value;
+  void toggleAutoAssist(bool value) {
+    autoAssistEnabled = value;
+    if (value) {
+      _assistForceAttention = null;
+      _assistForceMeditation = null;
+      _assistActiveTarget = null;
+    }
     _log(
       value
-          ? "=== Edição ao vivo LIGADA — atenção/meditação/onda serão "
-                "sobrescritas antes de sair pra aranha ==="
-          : "=== Edição ao vivo DESLIGADA — relay volta a ser bytes originais ===",
+          ? "=== Assistência automática LIGADA — quando atenção/meditação "
+                "reais chegarem perto de V1/V2/V3, ajusta pro valor exato "
+                "antes de sair pra aranha; longe disso, manda a leitura "
+                "real sem mexer ==="
+          : "=== Assistência automática DESLIGADA ===",
     );
     notifyListeners();
   }
 
-  void setForceAttention(int? value) {
-    forceAttention = value;
-    notifyListeners();
-  }
-
-  void setForceMeditation(int? value) {
-    forceMeditation = value;
-    notifyListeners();
-  }
-
-  void setRawGain(double? value) {
-    rawGain = value;
+  void toggleDiagonalAssist(bool value) {
+    diagonalAssistEnabled = value;
+    if (value) {
+      _diagonalForceMeditation = null;
+    }
+    _log(
+      value
+          ? "=== Assistência diagonal (só foco) LIGADA — meditação vai ser "
+                "calculada a partir da atenção real (soma≈100) antes de "
+                "sair pra aranha ==="
+          : "=== Assistência diagonal (só foco) DESLIGADA ===",
+    );
     notifyListeners();
   }
 
