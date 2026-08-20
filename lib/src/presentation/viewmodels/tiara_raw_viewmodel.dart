@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -95,6 +96,21 @@ class TiaraRawViewModel extends ChangeNotifier {
     (att: 85, med: 20, label: "V3"),
   ];
   static const int _assistTolerance = 15;
+  // Dado 100% parado nunca faz a aranha andar (achado confirmado em
+  // docs/FUNCIONAMENTO.md §11.4/§11.5) — por isso o valor ajustado nunca
+  // sai cru igual ao ponto confirmado (ex.: sempre exatamente 35). A cada
+  // pacote real, oscila um pouquinho em torno do ponto (ex.: 34, 35, 36,
+  // 35, 34, 35...) — pequeno o bastante pra não escapar da tolerância de
+  // outro ponto (os 3 pontos ficam a pelo menos ~20 de distância um do
+  // outro), grande o bastante pra nunca repetir o mesmo valor por muito
+  // tempo seguido.
+  static const int _assistJitterAmount = 2;
+  final math.Random _rng = math.Random();
+  int _jitterAssist(int base) {
+    final delta = _rng.nextInt(_assistJitterAmount * 2 + 1) - _assistJitterAmount;
+    return (base + delta).clamp(0, 100);
+  }
+
   int? _assistForceAttention;
   int? _assistForceMeditation;
   String? _assistActiveTarget;
@@ -103,8 +119,11 @@ class TiaraRawViewModel extends ChangeNotifier {
   String? get debugAssistTarget => _assistActiveTarget;
 
   /// Se (att, med) está perto o bastante de algum ponto confirmado, ajusta
-  /// os campos de override pra ESSE ponto exato; senão limpa os overrides
-  /// (o relay deixa a leitura real passar intacta).
+  /// os campos de override pra PERTO desse ponto (com jitter — ver
+  /// _jitterAssist acima, nunca o valor cru/constante); senão limpa os
+  /// overrides (o relay deixa a leitura real passar intacta). A escolha de
+  /// qual ponto é o mais próximo usa sempre a leitura real (att/med), não o
+  /// valor jitterado — o jitter só afeta o que é mandado pra aranha.
   void _applyAutoAssist(int att, int med) {
     ({int att, int med, String label})? closest;
     var closestDist = 1 << 30;
@@ -119,8 +138,8 @@ class TiaraRawViewModel extends ChangeNotifier {
       }
     }
     if (closest != null) {
-      _assistForceAttention = closest.att;
-      _assistForceMeditation = closest.med;
+      _assistForceAttention = _jitterAssist(closest.att);
+      _assistForceMeditation = _jitterAssist(closest.med);
       _assistActiveTarget = closest.label;
     } else {
       _assistForceAttention = null;
