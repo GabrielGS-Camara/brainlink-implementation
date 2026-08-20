@@ -1,314 +1,29 @@
 package com.example.brainlink // Mantenha o seu pacote
 
 import android.bluetooth.*
-import android.bluetooth.le.*
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.os.ParcelUuid
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
-import com.boby.bluetoothconnect.LinkManager
-import com.boby.bluetoothconnect.bean.BrainWave
-import com.boby.bluetoothconnect.bean.Gravity
-import com.boby.bluetoothconnect.classic.bean.BlueConnectDevice
-import com.boby.bluetoothconnect.classic.listener.EEGPowerDataListener
-import com.boby.bluetoothconnect.classic.listener.OnConnectListener
-import com.boby.bluetoothconnect.callback.ScanCallBack
 import com.boby.bluetoothconnect.classic.listener.OnReceiveBytesListener
 import com.boby.bluetoothconnect.services.BluetoothChatService
-import com.boby.bluetoothconnect.utill.DistractedUtill // Classe de distração
 import java.io.IOException
-import java.util.ArrayList
 import java.util.UUID
 
 class MainActivity: FlutterActivity() {
-    private val METHOD_CHANNEL = "brainlink_channel"
-    private val SCAN_EVENT_CHANNEL = "brainlink_scan_channel"
-    private val DATA_EVENT_CHANNEL = "brainlink_data_channel"
-
-    // --- Canais do emulador da tiara ---
-    private val TIARA_EMULATOR_METHOD_CHANNEL = "tiara_emulator_channel"
-    private val TIARA_EMULATOR_EVENT_CHANNEL = "tiara_emulator_events"
-
     // --- Canais da conexão CLÁSSICA (SPP/RFCOMM) com a aranha ---
     private val SPIDER_CLASSIC_METHOD_CHANNEL = "spider_classic_channel"
     private val SPIDER_CLASSIC_EVENT_CHANNEL = "spider_classic_events"
 
-    private var scanEventSink: EventChannel.EventSink? = null
-    private var dataEventSink: EventChannel.EventSink? = null
-    private var tiaraEmulatorEventSink: EventChannel.EventSink? = null
     private var spiderClassicEventSink: EventChannel.EventSink? = null
-    private var methodChannel: MethodChannel? = null
 
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val foundDevicesMap = mutableMapOf<String, BlueConnectDevice>()
-
-    // Utilitário de Distração
-    private val distractedUtill = DistractedUtill()
-
-    private var currentGravityX = 0
-    private var currentGravityY = 0
-    private var currentGravityZ = 0
-    private var lastBlinkStrength = 0
-
-    // ==========================================================
-    // EMULADOR DA TIARA (GATT SERVER + ADVERTISING)
-    // ==========================================================
-    // UUIDs extraídos de UUIDUtils.class dentro do
-    // MacrotellectLink_V1_4_3.jar (WRITE_SERVICE_UUID / WRITE_CHAR_UUID).
-    // Padrão comum de canal serial BLE (estilo Nordic UART):
-    //   6e400001 = serviço
-    //   6e400002 = característica de escrita (RX do ponto de vista do server)
-    //   6e400003 = característica de notificação (TX do ponto de vista do server)
-    private val TIARA_SERVICE_UUID = UUID.fromString("6e400001-b5a3-f393-e0a9-e50e24dcca9e")
-    private val TIARA_WRITE_CHAR_UUID = UUID.fromString("6e400002-b5a3-f393-e0a9-e50e24dcca9e")
-    private val TIARA_NOTIFY_CHAR_UUID = UUID.fromString("6e400003-b5a3-f393-e0a9-e50e24dcca9e")
-    private val CCCD_UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
-
-    private var bluetoothGattServer: BluetoothGattServer? = null
-    private var bleAdvertiser: BluetoothLeAdvertiser? = null
-    private var notifyCharacteristic: BluetoothGattCharacteristic? = null
-    private val subscribedDevices = mutableSetOf<BluetoothDevice>()
-    private var originalAdapterName: String? = null
-
-    private var mockDataHandler: Handler? = null
-    private var mockDataRunnable: Runnable? = null
-    private var mockStartTime = 0L
-
-    private fun emitEmulatorEvent(message: String, extra: Map<String, Any?> = emptyMap()) {
-        val payload = mutableMapOf<String, Any?>("message" to message)
-        payload.putAll(extra)
-        mainHandler.post { tiaraEmulatorEventSink?.success(payload) }
-    }
-
-    private fun startTiaraEmulation() {
-        val bluetoothManager = getSystemService(BLUETOOTH_SERVICE) as BluetoothManager
-        val adapter = bluetoothManager.adapter
-        if (adapter == null || !adapter.isEnabled) {
-            emitEmulatorEvent("Bluetooth está desligado — ligue e tente de novo.")
-            return
-        }
-
-        bleAdvertiser = adapter.bluetoothLeAdvertiser
-        if (bleAdvertiser == null) {
-            emitEmulatorEvent("Este aparelho não suporta advertising BLE (papel de periférico).")
-            return
-        }
-
-        try {
-            // GATT Server — o "servidor" que a aranha (se ela conectar como
-            // central) enxergaria como se fosse a tiara real.
-            bluetoothGattServer = bluetoothManager.openGattServer(this, gattServerCallback)
-            val service = BluetoothGattService(TIARA_SERVICE_UUID, BluetoothGattService.SERVICE_TYPE_PRIMARY)
-
-            val writeChar = BluetoothGattCharacteristic(
-                TIARA_WRITE_CHAR_UUID,
-                BluetoothGattCharacteristic.PROPERTY_WRITE or BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE,
-                BluetoothGattCharacteristic.PERMISSION_WRITE
-            )
-
-            val notifyChar = BluetoothGattCharacteristic(
-                TIARA_NOTIFY_CHAR_UUID,
-                BluetoothGattCharacteristic.PROPERTY_NOTIFY,
-                BluetoothGattCharacteristic.PERMISSION_READ
-            )
-            val cccDescriptor = BluetoothGattDescriptor(
-                CCCD_UUID,
-                BluetoothGattDescriptor.PERMISSION_READ or BluetoothGattDescriptor.PERMISSION_WRITE
-            )
-            notifyChar.addDescriptor(cccDescriptor)
-            notifyCharacteristic = notifyChar
-
-            service.addCharacteristic(writeChar)
-            service.addCharacteristic(notifyChar)
-            bluetoothGattServer?.addService(service)
-
-            // Anuncia com o MESMO NOME da tiara real ("BrainLink_Pro").
-            // Isso muda o nome Bluetooth do sistema temporariamente — guardamos
-            // o original para restaurar em stopTiaraEmulation().
-            originalAdapterName = adapter.name
-            adapter.name = "BrainLink_Pro"
-
-            val settings = AdvertiseSettings.Builder()
-                .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
-                .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
-                .setConnectable(true)
-                .build()
-
-            // O pacote de advertising BLE tem limite de 31 bytes. Nome +
-            // UUID de serviço de 128 bits juntos passam disso (erro
-            // ADVERTISE_FAILED_DATA_TOO_LARGE, código 1) — por isso
-            // dividimos em dois pacotes: o UUID vai no advertising
-            // principal, o nome vai no scan response (o scanner lê os
-            // dois automaticamente, incluindo nRF Connect).
-            val advertiseData = AdvertiseData.Builder()
-                .setIncludeDeviceName(false)
-                .addServiceUuid(ParcelUuid(TIARA_SERVICE_UUID))
-                .build()
-
-            val scanResponseData = AdvertiseData.Builder()
-                .setIncludeDeviceName(true)
-                .build()
-
-            bleAdvertiser?.startAdvertising(settings, advertiseData, scanResponseData, advertiseCallback)
-            emitEmulatorEvent(
-                "📡 Advertising solicitado como 'BrainLink_Pro' | Serviço: $TIARA_SERVICE_UUID"
-            )
-
-            subscribedDevices.clear()
-            startMockDataLoop()
-        } catch (e: SecurityException) {
-            emitEmulatorEvent("Permissão negada pelo Android ao tentar anunciar/abrir GATT server: ${e.message}")
-        } catch (e: Exception) {
-            emitEmulatorEvent("Erro ao iniciar emulação: ${e.message}")
-        }
-    }
-
-    private fun stopTiaraEmulation() {
-        try {
-            mockDataRunnable?.let { mockDataHandler?.removeCallbacks(it) }
-            mockDataRunnable = null
-
-            bleAdvertiser?.stopAdvertising(advertiseCallback)
-            bluetoothGattServer?.close()
-            bluetoothGattServer = null
-            subscribedDevices.clear()
-
-            // Restaura o nome Bluetooth original do aparelho.
-            originalAdapterName?.let { original ->
-                val bluetoothManager = getSystemService(BLUETOOTH_SERVICE) as BluetoothManager
-                bluetoothManager.adapter?.name = original
-            }
-            originalAdapterName = null
-
-            emitEmulatorEvent("=== Advertising e GATT server parados ===")
-        } catch (e: Exception) {
-            emitEmulatorEvent("Erro ao parar emulação: ${e.message}")
-        }
-    }
-
-    private val advertiseCallback = object : AdvertiseCallback() {
-        override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
-            emitEmulatorEvent("✅ Advertising confirmado pelo sistema Android.")
-        }
-        override fun onStartFailure(errorCode: Int) {
-            // 1=DATA_TOO_LARGE 2=TOO_MANY_ADVERTISERS 3=ALREADY_STARTED
-            // 4=INTERNAL_ERROR 5=FEATURE_UNSUPPORTED
-            emitEmulatorEvent("❌ Falha ao iniciar advertising. Código: $errorCode")
-        }
-    }
-
-    private val gattServerCallback = object : BluetoothGattServerCallback() {
-        override fun onConnectionStateChange(device: BluetoothDevice?, status: Int, newState: Int) {
-            if (device == null) return
-            if (newState == BluetoothProfile.STATE_CONNECTED) {
-                emitEmulatorEvent(
-                    "🔌 DISPOSITIVO CONECTOU -> MAC: ${device.address} | Nome: ${device.name ?: "N/A"}",
-                    mapOf("mac" to device.address, "name" to device.name)
-                )
-            } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                subscribedDevices.remove(device)
-                emitEmulatorEvent(
-                    "❌ DISPOSITIVO DESCONECTOU -> MAC: ${device.address}",
-                    mapOf("mac" to device.address)
-                )
-            }
-        }
-
-        override fun onCharacteristicWriteRequest(
-            device: BluetoothDevice?, requestId: Int, characteristic: BluetoothGattCharacteristic?,
-            preparedWrite: Boolean, responseNeeded: Boolean, offset: Int, value: ByteArray?
-        ) {
-            if (device != null && characteristic != null) {
-                val hex = value?.joinToString(" ") { String.format("%02X", it) } ?: ""
-                emitEmulatorEvent(
-                    "✍️ ESCRITA de ${device.address} na char ${characteristic.uuid} -> [$hex]",
-                    mapOf("mac" to device.address, "charUuid" to characteristic.uuid.toString(), "bytesHex" to hex)
-                )
-            }
-            if (responseNeeded) {
-                bluetoothGattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
-            }
-        }
-
-        override fun onDescriptorWriteRequest(
-            device: BluetoothDevice?, requestId: Int, descriptor: BluetoothGattDescriptor?,
-            preparedWrite: Boolean, responseNeeded: Boolean, offset: Int, value: ByteArray?
-        ) {
-            if (device != null && descriptor?.uuid == CCCD_UUID) {
-                if (value != null && value.contentEquals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)) {
-                    subscribedDevices.add(device)
-                    emitEmulatorEvent("🔔 ${device.address} se inscreveu para notificações (como o app oficial faria).")
-                } else {
-                    subscribedDevices.remove(device)
-                    emitEmulatorEvent("🔕 ${device.address} cancelou a inscrição.")
-                }
-            }
-            if (responseNeeded) {
-                bluetoothGattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
-            }
-        }
-
-        override fun onCharacteristicReadRequest(
-            device: BluetoothDevice?, requestId: Int, offset: Int, characteristic: BluetoothGattCharacteristic?
-        ) {
-            if (device != null) {
-                emitEmulatorEvent("👁️ LEITURA de ${device.address} na char ${characteristic?.uuid}")
-            }
-            bluetoothGattServer?.sendResponse(
-                device, requestId, BluetoothGatt.GATT_SUCCESS, offset,
-                characteristic?.value ?: ByteArray(0)
-            )
-        }
-    }
-
-    /// Manda "atenção" mockada em rampa triangular (0 -> 100 -> 0) a cada
-    /// ciclo de ~20s, repetindo indefinidamente até stopTiaraEmulation().
-    /// Repetir é intencional — o pedido foi "mesmo que o mesmo repetidamente",
-    /// e assim cobrimos o caso da aranha conectar bem depois do início.
-    private fun startMockDataLoop() {
-        mockStartTime = System.currentTimeMillis()
-        mockDataHandler = Handler(Looper.getMainLooper())
-        mockDataRunnable = object : Runnable {
-            override fun run() {
-                val elapsedMs = System.currentTimeMillis() - mockStartTime
-                val cyclePos = elapsedMs % 20000L // ciclo de 20s
-                val progress = cyclePos.toFloat() / 20000f
-
-                // Sobe 0->100 na primeira metade, desce 100->0 na segunda.
-                val attention = if (progress < 0.5f) {
-                    (progress * 2 * 100).toInt()
-                } else {
-                    ((1 - progress) * 2 * 100).toInt()
-                }
-
-                val payload = byteArrayOf(attention.toByte())
-                notifyCharacteristic?.value = payload
-
-                if (subscribedDevices.isNotEmpty()) {
-                    for (dev in subscribedDevices) {
-                        bluetoothGattServer?.notifyCharacteristicChanged(dev, notifyCharacteristic, false)
-                    }
-                    emitEmulatorEvent("🎭 Atenção mockada: $attention -> enviada para ${subscribedDevices.size} dispositivo(s)")
-                } else {
-                    emitEmulatorEvent("🎭 Atenção mockada: $attention (ninguém inscrito ainda)")
-                }
-
-                mockDataHandler?.postDelayed(this, 500)
-            }
-        }
-        mockDataHandler?.post(mockDataRunnable!!)
-    }
-    // ==========================================================
-    // FIM DO EMULADOR DA TIARA
-    // ==========================================================
 
     // ==========================================================
     // CONEXÃO CLÁSSICA (SPP/RFCOMM) COM A ARANHA
@@ -340,6 +55,18 @@ class MainActivity: FlutterActivity() {
     private var classicSocket: BluetoothSocket? = null
     private var classicReadThread: Thread? = null
     @Volatile private var classicConnectThread: Thread? = null
+
+    // Fila de escrita dedicada para o socket clássico. sendClassicBytes() é
+    // chamado pelo handler do MethodChannel, que roda na UI thread — um
+    // socket.outputStream.write() síncrono ali travava o app inteiro a cada
+    // pacote retransmitido da tiara (relay dispara em intervalo muito curto).
+    // Agora o handler só enfileira e retorna na hora; quem escreve de fato é
+    // essa thread dedicada. Capacidade pequena e descarte do mais antigo
+    // quando cheia: para controle de movimento em tempo real, o pacote mais
+    // recente importa mais que um atrasado.
+    private val classicWriteQueue = java.util.concurrent.LinkedBlockingQueue<ByteArray>(50)
+    private var classicWriteThread: Thread? = null
+    @Volatile private var classicWriteThreadRunning = false
 
     private fun emitClassicEvent(message: String, extra: Map<String, Any?> = emptyMap()) {
         val payload = mutableMapOf<String, Any?>("message" to message)
@@ -485,6 +212,7 @@ class MainActivity: FlutterActivity() {
                         mapOf("mac" to macAddress, "name" to device.name, "via" to usedLabel)
                     )
                     startClassicReadLoop(socket)
+                    startClassicWriteLoop(socket)
                 } else {
                     emitClassicEvent("❌ Falha ao conectar em todas as tentativas (UUID custom + SPP + canais 1-5).")
                 }
@@ -561,9 +289,7 @@ class MainActivity: FlutterActivity() {
                         emitClassicEvent("⬅️ Recebido ($bytesRead bytes): $hex", mapOf("bytesHex" to hex))
                     }
                 } catch (e: IOException) {
-                    if (classicSocket == socket) {
-                        emitClassicEvent("Conexão SPP encerrada: ${e.message}")
-                    }
+                    handleClassicSocketLost(socket, "leitura encerrada: ${e.message}")
                     break
                 }
             }
@@ -585,24 +311,95 @@ class MainActivity: FlutterActivity() {
         }
     }
 
+    /// Evita reportar a mesma perda de conexão duas vezes (leitura e escrita
+    /// podem detectar o mesmo socket morto quase ao mesmo tempo).
+    private fun handleClassicSocketLost(socket: BluetoothSocket, reason: String) {
+        if (classicSocket != socket) return // já tratado por outra thread/reconexão
+        classicSocket = null
+        classicWriteThreadRunning = false
+        classicWriteQueue.clear()
+        try { socket.close() } catch (e: IOException) {}
+        // "Desconectado" é uma das strings que o lado Dart usa pra virar
+        // isConnected = false — sem isso a tela ficava mostrando "Conectado"
+        // enquanto o envio já tinha morrido silenciosamente por dentro.
+        emitClassicEvent("Desconectado do SPP clássico ($reason).")
+    }
+
+    private var _lastClassicWriteErrorLogAt = 0L
+
+    private fun startClassicWriteLoop(socket: BluetoothSocket) {
+        classicWriteQueue.clear()
+        classicWriteThreadRunning = true
+        classicWriteThread = Thread {
+            while (classicWriteThreadRunning && classicSocket == socket) {
+                val bytes = try {
+                    classicWriteQueue.poll(500, java.util.concurrent.TimeUnit.MILLISECONDS)
+                } catch (e: InterruptedException) {
+                    break
+                } ?: continue
+
+                try {
+                    socket.outputStream.write(bytes)
+                    val hex = bytes.joinToString(" ") { String.format("%02X", it) }
+                    emitClassicEvent(
+                        "➡️ Enviado (${bytes.size} bytes): $hex",
+                        mapOf("bytesHex" to hex, "sent" to true)
+                    )
+                } catch (e: IOException) {
+                    // socket.isConnected reflete o estado real do socket (mesma
+                    // checagem usada em checkClassicConnectionStatus()). Só
+                    // tratamos como fatal se o socket realmente morreu — uma
+                    // falha pontual (buffer momentaneamente cheio etc.) não pode
+                    // matar o relay inteiro pro resto da sessão, senão a aranha
+                    // para de se mover silenciosamente enquanto a tela ainda
+                    // mostra "Conectado" (foi exatamente esse o bug: antes,
+                    // cada write era uma chamada independente que se
+                    // recuperava sozinha na próxima tentativa; agora que é um
+                    // loop persistente, um único erro não pode ser fatal).
+                    val stillConnected = try { socket.isConnected } catch (e2: Exception) { false }
+                    if (!stillConnected) {
+                        handleClassicSocketLost(socket, "falha ao enviar: ${e.message}")
+                        break
+                    }
+                    val now = System.currentTimeMillis()
+                    if (now - _lastClassicWriteErrorLogAt > 2000) {
+                        _lastClassicWriteErrorLogAt = now
+                        emitClassicEvent("⚠️ Falha pontual ao enviar via SPP, seguindo: ${e.message}")
+                    }
+                }
+            }
+        }
+        classicWriteThread?.start()
+    }
+
+    private fun stopClassicWriteLoop() {
+        classicWriteThreadRunning = false
+        classicWriteQueue.clear()
+        classicWriteThread?.interrupt()
+        classicWriteThread = null
+    }
+
+    /// Só ENFILEIRA os bytes — quem escreve de fato é a classicWriteThread.
+    /// Isso é chamado pelo handler do MethodChannel (UI thread); um
+    /// socket.outputStream.write() síncrono direto aqui travava o app a
+    /// cada pacote retransmitido da tiara (ver classicWriteQueue acima).
+    /// Fila cheia = descarta o mais antigo: pro controle de movimento em
+    /// tempo real, o pacote mais recente é o que importa.
     private fun sendClassicBytes(bytes: ByteArray) {
-        val socket = classicSocket
-        if (socket == null) {
+        if (classicSocket == null) {
             emitClassicEvent("Sem conexão SPP ativa — conecte primeiro.")
             return
         }
-        try {
-            socket.outputStream.write(bytes)
-            val hex = bytes.joinToString(" ") { String.format("%02X", it) }
-            emitClassicEvent("➡️ Enviado (${bytes.size} bytes): $hex")
-        } catch (e: IOException) {
-            emitClassicEvent("Erro ao enviar via SPP: ${e.message}")
+        if (!classicWriteQueue.offer(bytes)) {
+            classicWriteQueue.poll()
+            classicWriteQueue.offer(bytes)
         }
     }
 
     private fun disconnectClassic() {
         val socket = classicSocket
         classicSocket = null
+        stopClassicWriteLoop()
         try { socket?.close() } catch (e: IOException) {}
         if (socket != null) {
             emitClassicEvent("Desconectado do SPP clássico.")
@@ -724,163 +521,8 @@ class MainActivity: FlutterActivity() {
     // FIM DO CANAL "OFICIAL" (SDK)
     // ==========================================================
 
-    private val myEegListener = object : EEGPowerDataListener {
-        override fun onGravity(mac: String?, gravity: Gravity?) {
-            if (gravity != null) {
-                currentGravityX = gravity.X
-                currentGravityY = gravity.Y
-                currentGravityZ = gravity.Z
-            }
-        }
-
-        override fun onRawData(mac: String?, raw: Int) {
-            val blinkValue = com.boby.bluetoothconnect.ble.utils.EyesUtil.eyesDate(raw)
-            if (blinkValue != -1) {
-                lastBlinkStrength = blinkValue
-            }
-        }
-
-        override fun onBrainWavedata(mac: String?, wave: BrainWave?) {
-            if (wave == null || dataEventSink == null) return
-
-            // Avalia distração via classe proprietária
-            val isDistracted = distractedUtill.add(wave.att)
-
-            val data = mapOf(
-                "attention" to wave.att, "meditation" to wave.med, "signal" to wave.signal,
-                "delta" to wave.delta, "theta" to wave.theta,
-                "lowAlpha" to wave.lowAlpha, "highAlpha" to wave.highAlpha,
-                "lowBeta" to wave.lowBeta, "highBeta" to wave.highBeta,
-                "lowGamma" to wave.lowGamma, "middleGamma" to wave.middleGamma,
-                "battery" to wave.batteryCapacity,
-                "gravityX" to currentGravityX,
-                "gravityY" to currentGravityY,
-                "gravityZ" to currentGravityZ,
-                "blink" to lastBlinkStrength,
-                "heartRate" to wave.heartRate,
-                "grind" to wave.grind,
-                "isDistracted" to isDistracted
-            )
-            mainHandler.post { dataEventSink?.success(data) }
-
-            if (lastBlinkStrength > 0) {
-                lastBlinkStrength = 0
-            }
-        }
-
-        override fun onRR(mac: String?, rr: ArrayList<Int>?, param: Int) {}
-    }
-
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        LinkManager.init(this)
-        LinkManager.getInstance().setMultiEEGPowerDataListener(myEegListener)
-
-        // Trava de segurança no SDK
-        try {
-            val parser3Field = LinkManager::class.java.getDeclaredField("parser3")
-            parser3Field.isAccessible = true
-            val parser3Obj = parser3Field.get(LinkManager.getInstance())
-
-            val setListenerMethod = parser3Obj.javaClass.getDeclaredMethod("setEEGPowerDataListener", EEGPowerDataListener::class.java)
-            setListenerMethod.isAccessible = true
-            setListenerMethod.invoke(parser3Obj, myEegListener)
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-
-        LinkManager.getInstance().setOnConnectListener(object : OnConnectListener {
-            override fun onConnectStart(device: BlueConnectDevice?) {}
-            override fun onConnectting(device: BlueConnectDevice?) {}
-            override fun onConnectSuccess(device: BlueConnectDevice?) {
-                LinkManager.getInstance().setDataType(5) // Giroscópio + Grind
-            }
-            override fun onConnectionLost(device: BlueConnectDevice?) {
-                mainHandler.post { methodChannel?.invokeMethod("onConnectionLost", null) }
-            }
-            override fun onConnectFailed(device: BlueConnectDevice?) {}
-            override fun onError(e: Exception?) {}
-        })
-
-        LinkManager.getInstance().setScanCallBack(object : ScanCallBack {
-            override fun onScaningDeviceFound(device: BlueConnectDevice?) {
-                if (device != null && device.address != null) {
-                    foundDevicesMap[device.address] = device
-                    mainHandler.post {
-                        scanEventSink?.success(mapOf("name" to (device.name ?: "Desconhecido"), "mac" to device.address))
-                    }
-                }
-            }
-            override fun onScanFinish() {}
-        })
-    }
-
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-
-        methodChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, METHOD_CHANNEL)
-        methodChannel?.setMethodCallHandler { call, result ->
-            when (call.method) {
-                "startScan" -> {
-                    foundDevicesMap.clear()
-                    LinkManager.getInstance().startScan()
-                    result.success(true)
-                }
-                "connect" -> {
-                    val macAddress = call.argument<String>("macAddress")
-                    val deviceToConnect = foundDevicesMap[macAddress]
-                    if (deviceToConnect != null) {
-                        LinkManager.getInstance().stopScan()
-                        LinkManager.getInstance().connectDevice(deviceToConnect)
-                        result.success(true)
-                    } else {
-                        result.error("DEVICE_NOT_FOUND", "Dispositivo não encontrado", null)
-                    }
-                }
-                "disconnect" -> {
-                    LinkManager.getInstance().close()
-                    result.success(true)
-                }
-                else -> result.notImplemented()
-            }
-        }
-
-        EventChannel(flutterEngine.dartExecutor.binaryMessenger, SCAN_EVENT_CHANNEL).setStreamHandler(
-            object : EventChannel.StreamHandler {
-                override fun onListen(arguments: Any?, events: EventChannel.EventSink?) { scanEventSink = events }
-                override fun onCancel(arguments: Any?) { scanEventSink = null }
-            }
-        )
-
-        EventChannel(flutterEngine.dartExecutor.binaryMessenger, DATA_EVENT_CHANNEL).setStreamHandler(
-            object : EventChannel.StreamHandler {
-                override fun onListen(arguments: Any?, events: EventChannel.EventSink?) { dataEventSink = events }
-                override fun onCancel(arguments: Any?) { dataEventSink = null }
-            }
-        )
-
-        // --- Canais do emulador da tiara ---
-        val tiaraEmulatorMethodChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, TIARA_EMULATOR_METHOD_CHANNEL)
-        tiaraEmulatorMethodChannel.setMethodCallHandler { call, result ->
-            when (call.method) {
-                "startEmulation" -> {
-                    startTiaraEmulation()
-                    result.success(true)
-                }
-                "stopEmulation" -> {
-                    stopTiaraEmulation()
-                    result.success(true)
-                }
-                else -> result.notImplemented()
-            }
-        }
-
-        EventChannel(flutterEngine.dartExecutor.binaryMessenger, TIARA_EMULATOR_EVENT_CHANNEL).setStreamHandler(
-            object : EventChannel.StreamHandler {
-                override fun onListen(arguments: Any?, events: EventChannel.EventSink?) { tiaraEmulatorEventSink = events }
-                override fun onCancel(arguments: Any?) { tiaraEmulatorEventSink = null }
-            }
-        )
 
         // --- Canais da conexão clássica (SPP/RFCOMM) com a aranha ---
         val spiderClassicMethodChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, SPIDER_CLASSIC_METHOD_CHANNEL)
@@ -954,7 +596,6 @@ class MainActivity: FlutterActivity() {
     }
 
     override fun onDestroy() {
-        stopTiaraEmulation()
         stopClassicDiscovery()
         disconnectClassic()
         disconnectClassicSdk()

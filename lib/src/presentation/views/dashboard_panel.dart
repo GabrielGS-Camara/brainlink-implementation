@@ -42,10 +42,18 @@ class DashboardPanel extends StatelessWidget {
                   },
                 ),
                 ListenableBuilder(
-                  listenable: spiderClassicViewModel,
+                  // Escuta os dois — o card de replay de bytes reais (seção
+                  // "Reenviar histórico real capturado") depende do
+                  // tiaraRawViewModel.rawByteHistory, que só o outro
+                  // viewmodel atualiza.
+                  listenable: Listenable.merge([
+                    spiderClassicViewModel,
+                    tiaraRawViewModel,
+                  ]),
                   builder: (context, _) {
                     return SpiderClassicPanel(
                       viewModel: spiderClassicViewModel,
+                      tiaraRawViewModel: tiaraRawViewModel,
                     );
                   },
                 ),
