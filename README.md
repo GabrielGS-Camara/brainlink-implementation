@@ -1,7 +1,3 @@
-# brainlink
-
-A new Flutter project.
-
 ## Setup — SDK nativo da Macrotellect
 
 O app depende do `MacrotellectLink_V1.4.3.jar` (SDK proprietário da Macrotellect
